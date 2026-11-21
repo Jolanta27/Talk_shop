@@ -1,0 +1,10 @@
+[MASTER]
+ignore=venv,.venv
+
+[FORMAT]
+max-line-length=100
+
+[MESSAGES CONTROL]
+disable=
+    missing-module-docstring,
+    missing-function-docstring

@@ -1,0 +1,21 @@
+start: price_query
+    | stock_query
+    | stock_count_query
+
+price_query: "how much does" item "cost"
+           | "what is the price of" item
+           | "how much is" item
+
+stock_query: "is" item "in stock"
+           | "do we have" item
+           | "is" item "available"
+
+stock_count_query: "how many" item "are in stock"
+                | "how many" item "do we have"
+                | "what is the stock of" item
+
+item: WORD (" " WORD)*
+WORD: /[A-Za-z]+/
+
+%import common.WS
+%ignore WS
