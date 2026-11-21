@@ -2,22 +2,20 @@
 
 import argparse
 import logging
+import re
+import sqlite3
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 from lark import Lark, UnexpectedInput
 
-CATALOG: Dict[str, Dict[str, float | int]] = {
-    "apple": {"price": 2.99, "stock": 12},
-    "bread": {"price": 5.49, "stock": 4},
-    "milk": {"price": 3.25, "stock": 0},
-    "coffee": {"price": 18.0, "stock": 7},
-}
-
+from .database import ProductDatabase
 
 def normalize_text(text: str) -> str:
-    """Normalize user input by trimming and lowering case."""
-    return " ".join(text.lower().strip().split())
+    """Normalize user input by trimming, lowering case, and removing punctuation."""
+    text = text.lower().strip()
+    text = re.sub(r"[?.!,;:]", "", text)
+    return " ".join(text.split())
 
 
 def configure_logging(log_file: str, log_level: str) -> logging.Logger:
@@ -64,18 +62,20 @@ def load_grammar(grammar_path: str) -> Lark:
         raise RuntimeError(f"Invalid grammar: {exc}") from exc
 
 
-def find_item_name(question: str) -> Optional[str]:
-    """Find the product name mentioned in the user question."""
+def find_item_name(question: str, database: ProductDatabase) -> Optional[str]:
+    """Find a product name mentioned in the user's question."""
     text = normalize_text(question)
 
-    for item in CATALOG:
-        if item in text:
-            return item
+    for product in database.list_products():
+        name = normalize_text(product.name)
+        if re.search(rf"\b{re.escape(name)}s?\b", text):
+            return product.name
 
     return None
 
 
-def answer_question(question: str, grammar: Lark, logger: logging.Logger) -> str:
+def answer_question(question: str, grammar: Lark, logger: logging.Logger, database: ProductDatabase,
+                    ) -> str:
     """Answer a question about product price or stock."""
     text = normalize_text(question)
 
@@ -93,33 +93,147 @@ def answer_question(question: str, grammar: Lark, logger: logging.Logger) -> str
         logger.warning("Could not parse input: %s", text)
         return (
             "I did not understand the question. Try examples like: "
-            "'how much does apple cost?', "
-            "'is milk in stock?', "
-            "'how many apples are in stock?'"
+            "'How much does apple cost?', "
+            "'Is milk in stock?', "
+            "'How many apples are in stock?'"
         )
 
-    item = find_item_name(text)
+    item = find_item_name(text, database)
     if item is None:
         logger.warning("Unrecognized product in question: %s", text)
         return "I could not recognize the product name."
 
-    result = "I can answer only about price and stock availability."
+    product = database.find_product(item)
+    if product is None:
+        return "I could not find that product."
 
-    if "price" in text or "cost" in text or "how much" in text:
-        result = f"{item.capitalize()} costs {CATALOG[item]['price']:.2f} PLN."
-    elif "stock" in text or "in stock" in text or "available" in text or "do we have" in text:
-        stock = CATALOG[item]["stock"]
-        if stock > 0:
-            result = f"Yes, {item} is in stock. There are {stock} items available."
+    if "how many" in text:
+        result = f"There are {product.stock} {product.name}(s) in stock."
+    elif "price" in text or "cost" in text or "how much" in text:
+        result = f"{product.name.capitalize()} costs {product.price:.2f} PLN."
+    elif "stock" in text or "available" in text or "do we have" in text:
+        if product.stock > 0:
+            result = (
+                f"Yes, {product.name} is in stock. "
+                f"There are {product.stock} items available."
+            )
         else:
-            result = f"No, {item} is currently out of stock."
-    elif "how many" in text:
-        result = f"There are {CATALOG[item]['stock']} {item}(s) in stock."
+            result = f"No, {product.name} is currently out of stock."
+    else:
+        result = "I can answer only about price and stock availability."
 
     logger.info("Question: %s -> Answer: %s", text, result)
     return result
 
+def admin_menu(database: ProductDatabase, logger: logging.Logger) -> None:
+    """Manage products from the administrator menu."""
+    while True:
+        print("\n--- Administrator Menu ---")
+        print("1. Add product")
+        print("2. Find product")
+        print("3. Update product")
+        print("4. Delete product")
+        print("5. List products")
+        print("6. Clear database")
+        print("7. Return to chat")
 
+        choice = input("Choose an option: ").strip()
+
+        if choice == "1":
+            try:
+                name = input("Product name: ").strip()
+                price = float(input("Price in PLN: "))
+                stock = int(input("Stock quantity: "))
+                database.add_product(name, price, stock)
+                logger.info("Added product: %s", name)
+                print("Product added.")
+            except (ValueError, sqlite3.IntegrityError) as exc:
+                print(f"Invalid input: {exc}")
+
+        elif choice == "2":
+            name = input("Product name: ").strip()
+            product = database.find_product(name)
+
+            if product is None:
+                print("Product not found.")
+            else:
+                print(
+                    f"{product.name}: {product.price:.2f} PLN, "
+                    f"stock: {product.stock}"
+                )
+
+        elif choice == "3":
+            old_name = input("Current product name: ").strip()
+            product = database.find_product(old_name)
+
+            if product is None:
+                print("Product not found.")
+                continue
+
+            try:
+                new_name = input("New product name: ").strip()
+                price = float(input("New price in PLN: "))
+                stock = int(input("New stock quantity: "))
+                changed = database.update_product(
+                    old_name, new_name, price, stock
+                )
+
+                if changed:
+                    logger.info("Updated product: %s", old_name)
+                    print("Product updated.")
+                else:
+                    print("Product not found.")
+            except (ValueError, sqlite3.IntegrityError) as exc:
+                print(f"Invalid input: {exc}")
+
+        elif choice == "4":
+            name = input("Product name to delete: ").strip()
+            product = database.find_product(name)
+
+            if product is None:
+                print("Product not found.")
+                continue
+
+            confirmation = input(
+                f"Delete {product.name}? Type YES to confirm: "
+            ).strip()
+
+            if confirmation.upper() == "YES":
+                database.delete_product(name)
+                logger.info("Deleted product: %s", name)
+                print("Product deleted.")
+            else:
+                print("Deletion cancelled.")
+
+        elif choice == "5":
+            products = database.list_products()
+
+            if not products:
+                print("No products found.")
+            else:
+                for product in products:
+                    print(
+                        f"{product.name}: {product.price:.2f} PLN, "
+                        f"stock: {product.stock}"
+                    )
+
+        elif choice == "6":
+            confirmation = input(
+                "Clear the entire database? Type YES to confirm: "
+            ).strip()
+
+            if confirmation.upper() == "YES":
+                database.clear_products()
+                logger.info("Cleared the product database.")
+                print("Database cleared.")
+            else:
+                print("Database clearing cancelled.")
+
+        elif choice == "7":
+            return
+
+        else:
+            print("Invalid option. Choose a number from 1 to 7.")
 def main() -> None:
     """Run the chatbot loop."""
     parser = argparse.ArgumentParser(description="Shop chatbot")
@@ -155,6 +269,26 @@ def main() -> None:
         print(f"Error: {exc}")
         return
 
+    database = ProductDatabase(
+        Path(__file__).resolve().parents[2] / "talk_shop.db"
+    )
+
+    try:
+        database.initialize()
+
+        if not database.list_products():
+            for name, price, stock in (
+                ("apple", 2.99, 12),
+                ("bread", 5.49, 4),
+                ("milk", 3.25, 0),
+                ("coffee", 18.0, 7),
+            ):
+                database.add_product(name, price, stock)
+    except (OSError, ValueError) as exc:
+        logger.exception("Failed to initialize the product database.")
+        print(f"Error initializing product database: {exc}")
+        return
+
     print("Welcome to Talk Shop!")
     print("Type END to finish the conversation.")
 
@@ -182,12 +316,21 @@ def main() -> None:
             print("Bot: Goodbye!")
             break
 
+        if text.lower() == "admin":
+            admin_menu(database, logger)
+            continue
+
         logger.info("User asked: %s", text)
 
         try:
-            response = answer_question(text, grammar, logger)
+            response = answer_question(text, grammar, logger, database)
         except (ValueError, TypeError, KeyError, OSError):
-            logger.exception("Unexpected error while processing question: %s", text)
-            response = "Something went wrong while processing your question. Please try again."
+            logger.exception(
+                "Unexpected error while processing question: %s", text
+            )
+            response = (
+                "Something went wrong while processing your question. "
+                "Please try again."
+            )
 
         print(f"Bot: {response}")
